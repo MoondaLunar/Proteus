@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: maritime-db
+    environment:
+      POSTGRES_USER: maritime_user
+      POSTGRES_PASSWORD: maritime_secure_pass_${ENVIRONMENT:-dev}
+      POSTGRES_DB: maritime_ai
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U maritime_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: maritime-mq
+    environment:
+      RABBITMQ_DEFAULT_USER: maritime_user
+      RABBITMQ_DEFAULT_PASS: maritime_secure_pass_${ENVIRONMENT:-dev}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: maritime-cache
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: maritime-api
+    environment:
+      DATABASE_URL: postgresql://maritime_user:maritime_secure_pass_${ENVIRONMENT:-dev}@postgres:5432/maritime_ai
+      RABBITMQ_URL: amqp://maritime_user:maritime_secure_pass_${ENVIRONMENT:-dev}@rabbitmq:5672/
+      REDIS_URL: redis://redis:6379
+      ENVIRONMENT: ${ENVIRONMENT:-dev}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+  redis_data:
