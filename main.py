@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from config import (
     DEBUG, CORS_ORIGINS, ALLOWED_HOSTS, LOG_LEVEL, ENVIRONMENT
 )
+from store import store
 
 from ships import router as ships_router
 from decisions import router as decisions_router
@@ -131,8 +132,8 @@ async def system_status():
         "environment": ENVIRONMENT,
         "debug_mode": DEBUG,
         "database": db["status"],
-        "message_queue": "not implemented",
-        "cache": "not implemented",
+        "message_queue": store.queue.state(),
+        "cache": store.cache.state(),
         "routes_mounted": sorted(
             r.path for r in app.routes if r.path.startswith("/api/v1")
         ),
@@ -169,3 +170,4 @@ if __name__ == "__main__":
         reload=DEBUG,
         log_level=LOG_LEVEL.lower()
     )
+
