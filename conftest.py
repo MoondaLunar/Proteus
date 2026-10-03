@@ -2,6 +2,7 @@
 pytest configuration and fixtures
 """
 import pytest
+import os
 import asyncio
 from fastapi.testclient import TestClient
 import sys
@@ -251,3 +252,131 @@ class TestPhase2Status:
         assert isinstance(data["message_queue"], dict) and "depth" in data["message_queue"]
         assert isinstance(data["cache"], dict) and "entries" in data["cache"]
 
+
+
+class TestPhase3Persistence:
+    """Phase 3: PostgreSQL write-through + hydration against a real local PG.
+
+    Runs a real uvicorn server twice: server 1 writes and exits, server 2
+    hydrates from Postgres and verifies the data survived. Skipped honestly
+    when no PG is reachable at localhost:5432.
+    """
+
+    PG_URL = "postgresql://proteus:proteus@localhost:5432/proteus"
+    PORT = 8131
+
+    def _server(self, port):
+        import subprocess
+        env = dict(os.environ, DATABASE_URL=self.PG_URL)
+        return subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "main:app", "--port", str(port),
+             "--log-level", "warning"],
+            cwd=str(Path(__file__).parent.resolve()), env=env,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    @staticmethod
+    def _get(port, path):
+        import json as _json
+        from urllib.request import urlopen, Request
+        req = Request(f"http://127.0.0.1:{port}{path}",
+                      data=None, method="GET")
+        try:
+            with urlopen(req, timeout=5) as r:
+                return r.status, _json.loads(r.read())
+        except Exception as e:
+            return 0, {"error": str(e)}
+
+    @staticmethod
+    def _post(port, path, body):
+        import json as _json
+        from urllib.request import urlopen, Request
+        data = _json.dumps(body).encode()
+        req = Request(f"http://127.0.0.1:{port}{path}", data=data,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=5) as r:
+            return r.status, _json.loads(r.read())
+
+    def _wait_persistence(self, port, tries=60):
+        import time
+        for _ in range(tries):
+            code, st = self._get(port, "/status")
+            if code == 200 and st.get("persistence", {}).get("kind", "").startswith("PostgreSQL"):
+                return st
+            time.sleep(0.5)
+        return None
+
+    def test_write_through_and_hydrate(self, tmp_path):
+        import time
+        import asyncpg
+        loop = asyncio.new_event_loop()
+        try:
+            async def setup():
+                try:
+                    conn = await asyncpg.connect(self.PG_URL)
+                except Exception:
+                    return None
+                await conn.execute("""DROP TABLE IF EXISTS notifications, telemetry,
+                    decisions, crew, ships CASCADE""")
+                await conn.close()
+                return True
+            ok = loop.run_until_complete(setup())
+        finally:
+            loop.close()
+        if not ok:
+            pytest.skip("no PostgreSQL reachable at localhost:5432")
+
+        # --- server 1: write-through
+        s1 = self._server(self.PORT)
+        try:
+            st = self._wait_persistence(self.PORT)
+            assert st is not None, "server 1 never attached persistence"
+            assert st["persistence"]["writes_failed"] == 0, st["persistence"]
+
+            code, ship = self._post(self.PORT, "/api/v1/ships",
+                                    {"call_sign": "PERS1", "name": "Persistence Test"})
+            assert code == 201, ship
+            sid = ship["ship"]["id"]
+            code, crew = self._post(self.PORT, f"/api/v1/crew/{sid}",
+                                    {"name": "Hy", "role": "Deckhand", "employee_id": "H1"})
+            assert code == 201, crew
+            cid = crew["crew_member"]["id"]
+            code, _ = self._post(self.PORT, f"/api/v1/telemetry/{sid}",
+                                 {"sensor_type": "gps",
+                                  "data_point": {"latitude": 51.9, "longitude": 4.5}})
+            assert code == 202
+            code, dec = self._post(self.PORT, "/api/v1/decisions",
+                                   {"decision_type": "route_change", "decision_maker": "captain",
+                                    "recommended_action": "hold", "reasoning": {"why": "storm"}})
+            assert code == 201, dec
+            did = dec["decision"]["id"]
+            code, _ = self._post(self.PORT, f"/api/v1/decisions/{did}/approve",
+                                 {"approved": True, "approver_id": cid, "notes": "go"})
+            assert code == 200
+            code, st = self._get(self.PORT, "/status")
+            assert st["persistence"]["writes_failed"] == 0, st["persistence"]
+            st["__ids"] = {"ship_id": sid, "crew_id": cid, "decision_id": did}
+            (tmp_path / "ids.json").write_text(repr(st["__ids"]))
+        finally:
+            s1.terminate()
+            s1.wait(timeout=15)
+
+        # --- server 2: fresh process, hydrate from Postgres
+        s2 = self._server(self.PORT + 1)
+        try:
+            st = self._wait_persistence(self.PORT + 1)
+            assert st is not None, "server 2 never attached persistence"
+            code, ship = self._get(self.PORT + 1, f"/api/v1/ships/{sid}")
+            assert code == 200 and ship["call_sign"] == "PERS1", ship
+            code, _ = self._get(self.PORT + 1, f"/api/v1/crew/member/{cid}")
+            assert code == 200
+            code, tel = self._get(self.PORT + 1, f"/api/v1/telemetry/{sid}/gps")
+            assert code == 200 and tel["gps"]["latitude"] == 51.9, tel
+            code, d = self._get(self.PORT + 1, f"/api/v1/decisions/{did}")
+            assert code == 200 and d["decision"]["status"] == "approved", d
+            # id sequences continue after hydration
+            code, s2ship = self._post(self.PORT + 1, "/api/v1/ships",
+                                      {"call_sign": "PERS2", "name": "After Hydrate"})
+            assert code == 201 and s2ship["ship"]["id"] > sid, (s2ship, sid)
+        finally:
+            s2.terminate()
+            s2.wait(timeout=15)

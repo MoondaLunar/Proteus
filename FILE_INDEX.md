@@ -16,6 +16,7 @@
 - **main.py** - FastAPI application entry point
 - **config.py** - Configuration management
 - **database.py** - Database connection layer
+- **persistence.py** - PostgreSQL write-through + hydration (asyncpg, phase 3)
 - **ships.py** - Ship management routes
 - **decisions.py** - Decision engine routes
 - **telemetry.py** - Sensor data routes

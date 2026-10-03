@@ -77,6 +77,12 @@ class Store:
 
     def __init__(self):
         self.lock = asyncio.Lock()
+        # Phase 3: optional write-through persistence (None = in-memory only).
+        self.persist = None
+        # Class references used by persistence.hydrate()
+        self.ShipClass = Ship
+        self.CrewClass = CrewMember
+        self.DecisionClass = Decision
         self.ships: dict[int, Ship] = {}
         self.crew: dict[int, CrewMember] = {}
         self.decisions: dict[int, Decision] = {}

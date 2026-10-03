@@ -146,6 +146,8 @@ async def create_decision(decision: DecisionCreate):
             confidence_score=decision.confidence_score,
         )
         store.decisions[rec.id] = rec
+    if store.persist:
+        await store.persist.save_decision(rec)
     return {"decision": _decision_out(rec), "status": "logged"}
 
 
@@ -166,6 +168,8 @@ async def approve_decision(decision_id: int, approval: DecisionApproval):
         d.approver_id = approval.approver_id
         d.approval_notes = approval.notes
         d.decided_at = datetime.now(timezone.utc)
+    if store.persist:
+        await store.persist.save_decision(d)
     store.queue.enqueue({"event": "decision_" + d.status, "decision_id": d.id})
     return {"decision": _decision_out(d), "approved": approval.approved}
 
@@ -179,6 +183,8 @@ async def execute_decision(decision_id: int):
     async with store.lock:
         d.status = "executed"
         d.executed_at = datetime.now(timezone.utc)
+    if store.persist:
+        await store.persist.save_decision(d)
     store.queue.enqueue({"event": "decision_executed", "decision_id": d.id})
     return {"decision": _decision_out(d), "executed": True}
 

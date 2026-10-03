@@ -74,6 +74,8 @@ async def register_ship(ship: ShipCreate):
         )
         store.ships[rec.id] = rec
         store.cache.invalidate("ships")
+    if store.persist:
+        await store.persist.save_ship(rec)
     store.queue.enqueue({"event": "ship_registered", "ship_id": rec.id, "at": utcnow_iso()})
     return {"ship": _ship_summary(rec), "status": "created", "storage": "in-memory"}
 

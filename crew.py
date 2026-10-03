@@ -103,6 +103,9 @@ async def add_crew_member(ship_id: int, crew: CrewCreate):
         ship.crew_count += 1
         ship.updated_at = datetime.now(timezone.utc)
         store.cache.invalidate(f"ships:{ship_id}")
+    if store.persist:
+        await store.persist.save_crew(member)
+        await store.persist.save_ship(ship)
     return {"crew_member": _crew_out(member), "status": "created"}
 
 
@@ -158,6 +161,10 @@ async def send_crew_communication(crew_id: int, comms: CrewCommunication):
             }
             store.notifications.setdefault(rid, []).append(note)
             delivered.append(rid)
+    if store.persist:
+        for rid in delivered:
+            note = store.notifications[rid][-1]
+            await store.persist.save_notification(rid, note)
     store.queue.enqueue({"event": "crew_comm", "recipients": delivered})
     return {"from_crew_id": crew_id, "delivered_to": delivered, "status": "sent"}
 

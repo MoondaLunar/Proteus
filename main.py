@@ -33,6 +33,23 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def setup_persistence():
+    """Attach PostgreSQL persistence to the store (idempotent). Used by the
+    lifespan, and callable directly (tests, scripts). The pool is created
+    lazily on first use, in whichever loop is running."""
+    from persistence import Persistence, bootstrap, connect, hydrate, pg_url
+    pool = await connect()
+    if pool is None:
+        logger.warning("⚠ PostgreSQL unreachable, in-memory store only")
+        return None
+    await bootstrap(pool)
+    counts = await hydrate(pool, store)
+    await pool.close()  # hydration done; Persistence opens its own pool lazily
+    store.persist = Persistence(pg_url())
+    logger.info(f"✓ PostgreSQL persistence on, hydrated: {counts}")
+    return counts
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application startup and shutdown"""
@@ -51,10 +68,26 @@ async def lifespan(app: FastAPI):
         mark_db_unavailable(str(e))
         logger.warning(f"⚠ Database unavailable, running degraded: {e}")
 
+    # Phase 3: PostgreSQL persistence (asyncpg write-through + hydration).
+    # The API never depends on Postgres being reachable; when it is, the
+    # store survives restarts.
+    try:
+        await setup_persistence()
+    except Exception as e:
+        logger.warning(f"⚠ Persistence setup failed, in-memory store only: {e}")
+
     yield
 
     # Shutdown
     logger.info("🛑 Maritime AI System shutting down...")
+    try:
+        from persistence import close
+        if store.persist is not None:
+            await close(store.persist.pool)
+            store.persist = None
+            logger.info("✓ PostgreSQL pool closed")
+    except Exception as e:
+        logger.error(f"Error closing persistence pool: {e}")
     try:
         from database import close_db
         await close_db()
@@ -126,12 +159,16 @@ async def system_status():
     """Get detailed system status (truthful, reflects actual state)"""
     from database import db_state
     db = db_state()
+    persistence_state = store.persist.state() if store.persist else {
+        "kind": "in-memory only (PostgreSQL unreachable or not configured)"
+    }
     return {
         "status": "operational" if db["connected"] else "degraded",
         "version": "0.1.0",
         "environment": ENVIRONMENT,
         "debug_mode": DEBUG,
         "database": db["status"],
+        "persistence": persistence_state,
         "message_queue": store.queue.state(),
         "cache": store.cache.state(),
         "routes_mounted": sorted(

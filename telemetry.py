@@ -76,6 +76,8 @@ async def ingest_telemetry(ship_id: int, telemetry: TelemetryData):
     async with store.lock:
         store.telemetry.setdefault(ship_id, []).append(record)
         store.cache.invalidate(f"ships:{ship_id}")
+    if store.persist:
+        await store.persist.save_telemetry(ship_id, record)
     queued = store.queue.enqueue({"event": "telemetry", "ship_id": ship_id, "sensor_type": telemetry.sensor_type})
     return {
         "ship_id": ship_id,
@@ -116,6 +118,8 @@ async def update_gps_position(ship_id: int, position: GPSPosition):
     async with store.lock:
         store.telemetry.setdefault(ship_id, []).append(record)
         store.cache.invalidate(f"ships:{ship_id}")
+    if store.persist:
+        await store.persist.save_telemetry(ship_id, record)
     return {"ship_id": ship_id, "position": record["data_point"], "status": "updated"}
 
 
